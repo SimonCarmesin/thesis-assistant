@@ -16,6 +16,7 @@ What it does:
 
 ### 1) Create and activate venv
 python -m venv .venv
+
 .\.venv\Scripts\Activate.ps1
 
 ### 2) Install dependencies
@@ -41,12 +42,23 @@ Create index/global_summary.md with motivation, research question, hypotheses, a
 
 ## Generate rewrite (OpenAI)
 Create .env in project root:
+
 OPENAI_API_KEY=sk-...
+
 Optional:
+
 OPENAI_BASE_URL=https://api.openai.com/v1
+
 ANONYMIZED_TELEMETRY=False
 
 Run:
-python tools\generate_openai.py --task "..." --query "..." --chapter_hint "..." --section "2.5" --code_root ".\data" --code_query "McpEsClient" --print_prompt
+python tools\generate_openai.py 
+--task "..." 
+--query "..." 
+--chapter_hint "..." 
+--section "2.5" 
+--code_root ".\data" 
+--code_query "McpEsClient" 
+--print_prompt
 
 Outputs are written to out/ (generated text, prompts, logs, history).
