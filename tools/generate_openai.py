@@ -22,6 +22,9 @@ PERSIST_DIR = str((INDEX / "chroma").resolve())
 COLLECTION = "thesis"
 EMB_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+
+FORBIDDEN_CHARS = [":", ";", "–", "—"]
+
 def load_chunks():
     m = {}
     with CHUNKS.open("r", encoding="utf-8") as f:
@@ -133,13 +136,73 @@ ANWEISUNGEN:
 - Output: Nur der überarbeitete Text (kein Meta-Gelaber).
 """
 
+def validate_output(text: str) -> list[str]:
+    issues = []
+
+    for ch in [":", ";", "–", "—"]:
+        if ch in text:
+            issues.append(f"forbidden_char:{ch}")
+
+    # dash separator like " X - Y "
+    if re.search(r"\s-\s", text):
+        issues.append("dash_separator_detected")
+
+    # OPTIONAL: headings weiterhin als KI-typisch markieren
+    if re.search(r"(?m)^\s*#{1,6}\s+", text):
+        issues.append("markdown_headings_detected")
+
+    return sorted(set(issues))
+
+
+def make_repair_prompt(task: str, original: str, issues: list[str]) -> str:
+    issues_str = ", ".join(issues)
+
+    return f"""Du bist ein Lektor für eine deutschsprachige Masterarbeit. Du überarbeitest einen Textabschnitt so, dass er sich nahtlos in die bestehende Arbeit einfügt.
+
+STIL UND ROETER FADEN
+- Bleibe konsequent im Stil der bestehenden Arbeit, sachlich und wissenschaftlich, aber natürlich formuliert.
+- Achte darauf, dass der Text den roten Faden der Arbeit stärkt und den Abschnitt sinnvoll ersetzt.
+- Du darfst explizite Querverweise auf andere Kapitel setzen, wie in der Arbeit üblich, z.B. (Kap. 2.6.4), (Kap. 5.5), (Kap. 6.1).
+
+ZITIERREGELN
+- Vorhandene Quellenangaben im Format [10] dürfen NICHT verändert werden.
+- Wenn du neue Literatur einführen möchtest, dann:
+  1) Markiere die Stelle im Text mit einem neuen Platzhalter-Zitat im selben Format, z.B. [NEU1], [NEU2].
+  2) Füge am Ende einen Abschnitt "NEUE QUELLEN" an und liste dort jede neue Quelle vollständig im folgenden Stil:
+     [NEU1] Autor(en), Titel, Venue/Conference/Journal, Jahr. [Online]. Available: URL
+  3) Füge keine weiteren URLs in den Fließtext ein, nur in "NEUE QUELLEN".
+
+FORMALREGELN
+- Keine Doppelpunkte, keine Semikolons.
+- Kein Gedankenstrich und kein Bindestrich als Satztrenner, also weder '–' noch '—' und nicht ' - '.
+- Aufzählungen sind erlaubt, aber nutze keine Markdown-Überschriften.
+- Schreibe in gut lesbaren Absätzen, keine Meta-Kommentare.
+
+KONKRETE PROBLEME IM AKTUELLEN TEXT
+{issues_str}
+
+AUFGABE
+{task}
+
+TEXT, DER ÜBERARBEITET WERDEN MUSS
+{original}
+
+AUSGABE
+- Gib nur den überarbeiteten Text aus.
+- Falls du neue Quellen nutzt, hänge am Ende "NEUE QUELLEN" an.
+"""
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--task", required=True, help="Was soll geschrieben werden (z.B. 'Schreibe Kapitel 2.5 neu ...')?")
+    ap.add_argument(
+        "--task",
+        required=True,
+        help="Was soll geschrieben werden (z.B. 'Schreibe Kapitel 2.5 neu ...')?",
+    )
     ap.add_argument("--query", required=True, help="Retrieval query")
     ap.add_argument("--chapter_hint", default="")
-    ap.add_argument("--code_root", default=str((ROOT/"data").resolve()))
+    ap.add_argument("--code_root", default=str((ROOT / "data").resolve()))
     ap.add_argument("--code_query", default="mcp")
     ap.add_argument("--model", default="gpt-4o-mini")
     args = ap.parse_args()
@@ -156,6 +219,7 @@ def main():
         code_query=args.code_query,
     )
 
+    # 1) Erstentwurf (inhaltlich korrekt, grounded)
     prompt = make_prompt(args.task, context_text, code_hits)
 
     client = OpenAI(api_key=key)
@@ -167,8 +231,36 @@ def main():
         ],
         temperature=0.2,
     )
-
     text = resp.choices[0].message.content.strip()
+
+    # 2) Style/Critic Pass (Regeln erzwingen)
+    # Regeln:
+    # - Quellen exakt [10]
+    # - Keine ':' ';' '–' '—'
+    # - Keine Bullet-Listen oder Markdown-Überschriften
+    # - Kein Bindestrich als Satztrenner ( ' - ' )
+    for _ in range(2):
+        issues = validate_output(text)
+        hard = [
+            x
+            for x in issues
+            if x.startswith("forbidden_char:")
+            or x in {"bullet_list_detected", "dash_separator_detected", "markdown_headings_detected"}
+        ]
+        if not hard:
+            break
+
+        repair_prompt = make_repair_prompt(args.task, text, hard)
+        rep = client.chat.completions.create(
+            model=args.model,
+            messages=[
+                {"role": "system", "content": "Du bist ein präziser wissenschaftlicher Lektor."},
+                {"role": "user", "content": repair_prompt},
+            ],
+            temperature=0.2,
+        )
+        text = rep.choices[0].message.content.strip()
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = OUT / f"generated_{stamp}.md"
     out_path.write_text(text, encoding="utf-8")
